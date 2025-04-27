@@ -11,4 +11,7 @@ Before:
 
 After using pass:   
 
-![IDA](https://github.com/user-attachments/assets/4e313a59-1d8c-4044-80b2-01e5ae0309fc)
+![IDA](https://github.com/user-attachments/assets/4e313a59-1d8c-4044-80b2-01e5ae0309fc)  
+
+Decompilation:  Removes information about local vars  
+![compare](https://github.com/user-attachments/assets/eaaa0706-f301-4f86-b287-aaea11abadfe)
