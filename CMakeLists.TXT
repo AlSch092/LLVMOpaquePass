@@ -1,0 +1,97 @@
+cmake_minimum_required(VERSION 3.13)
+project(MyPass LANGUAGES CXX)
+
+# Find LLVM
+find_package(LLVM REQUIRED CONFIG)
+list(APPEND CMAKE_MODULE_PATH "${LLVM_CMAKE_DIR}")
+include(AddLLVM)
+
+if(MSVC)
+    set(CMAKE_CXX_STANDARD 17)
+    set(CMAKE_FORCED_STATIC_RUNTIME TRUE)  # This forces the static runtime to be used
+    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} /MT")
+    set(CMAKE_C_FLAGS_RELEASE "${CMAKE_C_FLAGS_RELEASE} /MT")
+    set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} /MTd")
+    set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} /MTd")
+endif()
+
+set(CMAKE_VERBOSE_MAKEFILE ON)
+
+link_directories(${LLVM_LIBRARY_DIRS})
+
+# Add the source file for your pass
+add_library(MyPass SHARED MyPass.cpp)
+
+# Link against LLVM libraries needed for your pass
+target_link_libraries(MyPass PRIVATE LLVMCore LLVMSupport)
+
+# Register the pass as a plugin
+add_llvm_pass_plugin(MyPass MyPass.cpp)
+
+target_include_directories(MyPass PRIVATE
+  "K:/LLVM/include"
+)
+
+target_link_directories(MyPass PRIVATE
+  "K:/LLVM/lib"
+)
+
+target_compile_definitions(MyPass PRIVATE ${LLVM_DEFINITIONS})
+
+target_link_libraries(MyPass
+    PRIVATE
+    LLVMDebugInfoDWARF
+    LLVMSupport
+    ntdll
+    LLVMIRReader
+    LLVMObject
+    LLVMCore
+    LLVMBitReader
+    LLVMBitstreamReader
+    LLVMSupport
+    LLVMAnalysis
+    LLVMTransformUtils
+    LLVMTarget
+    LLVMIRReader
+    LLVMTargetParser
+    LLVMOption
+    LLVMBitReader
+    LLVMObject
+    LLVMScalarOpts
+    LLVMCodeGen
+    LLVMInstCombine
+    LLVMVectorize
+    LLVMAsmParser
+    LLVMLinker
+    LLVMExecutionEngine
+    LLVMInterpreter
+    LLVMProfileData
+    LLVMRuntimeDyld
+    LLVMRemarks
+    LLVMDebugInfoDWARF
+    LLVM-C
+    LLVMPasses
+    LLVMAsmPrinter
+    LLVMCodeGen
+    LLVMDemangle
+    LLVMDiff
+    LLVMDlltoolDriver
+    LLVMLinker
+    LLVMMCJIT
+    LLVMMCParser
+    LLVMMIRParser
+    LLVMSymbolize
+    LLVMTableGen
+    LLVMTableGenCommon
+    LLVMDWP
+    LLVMDWARFLinker
+    LLVMDWARFLinkerClassic
+    LLVMDWARFLinkerParallel
+    LLVMRemarks
+    LLVMBinaryFormat
+)
+
+set_target_properties(MyPass PROPERTIES
+  COMPILE_FLAGS "-fno-rtti"
+)
+
