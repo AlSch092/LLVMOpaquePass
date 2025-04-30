@@ -4,6 +4,7 @@
 #include "llvm/IR/Function.h"  
 #include "llvm/Support/raw_ostream.h"  
 #include <map>
+#include <random>
 
 using namespace llvm;
 
@@ -28,29 +29,29 @@ namespace {
 
 		for (BasicBlock& BB : *F)
 		{
-			Instruction* Term = BB.getTerminator(); // inserts opaque predicate with junk bytes at the end of a function which makes IDA analysis more difficult
-
-			if (isa<ReturnInst>(Term)) //check if terminator is a 'ret' instruction
+			for (Instruction& I : BB)
 			{
-				BasicBlock* RetBlock = BB.splitBasicBlock(Term, "retBlock");
+				if (auto* Ret = dyn_cast<ReturnInst>(&I))
+				{
+					BasicBlock* RetBlock = Ret->getParent()->splitBasicBlock(Ret, "retBlock");
 
-				BasicBlock* OpaqueEntry = BasicBlock::Create(Ctx, "opaque_entry", F, RetBlock); // create new opaque logic blocks before RetBlock
-				BasicBlock* TrueBlock = BasicBlock::Create(Ctx, "trueBlock", F, RetBlock);
-				BasicBlock* FalseBlock = BasicBlock::Create(Ctx, "falseBlock", F, RetBlock);
+					BasicBlock* OpaqueEntry = BasicBlock::Create(Ctx, "opaque_entry", F, RetBlock);
+					BasicBlock* TrueBlock = BasicBlock::Create(Ctx, "trueBlock", F, RetBlock);
+					BasicBlock* FalseBlock = BasicBlock::Create(Ctx, "falseBlock", F, RetBlock);
 
-				InsertUnreachableJunkBlock(F, FalseBlock); // insert junk asm in the never-taken false block
+					InsertUnreachableJunkBlock(F, FalseBlock);
 
+					IRBuilder<> Builder(OpaqueEntry);
+					Value* Cond = Builder.getTrue();
+					Builder.CreateCondBr(Cond, TrueBlock, FalseBlock);
 
-				IRBuilder<> Builder(OpaqueEntry);                 // build opaque conditional branch
-				Value* Cond = Builder.getTrue();                  //always true statement
-				Builder.CreateCondBr(Cond, TrueBlock, FalseBlock);
+					IRBuilder<>(TrueBlock).CreateBr(RetBlock);
 
-				IRBuilder<>(TrueBlock).CreateBr(RetBlock);       //link True/False to RetBlock
+					BB.getTerminator()->eraseFromParent();
+					IRBuilder<>(&BB).CreateBr(OpaqueEntry);
 
-				BB.getTerminator()->eraseFromParent();           //redirect original BB to opaque_entry
-				IRBuilder<>(&BB).CreateBr(OpaqueEntry);
-
-				break; //insert once per function, removing this causes extremely slow pass time
+					return; // insert once
+				}
 			}
 		}
 	}
@@ -68,6 +69,67 @@ namespace {
 			errs() << "Transformed IR: " << "\n" << F << "\n";
 
 			return PreservedAnalyses::all();
+		}
+	};
+
+	struct XORConstInt : public PassInfoMixin<XORConstInt>  //xor obfuscate constants, working on basic tests (without arithmetic involved)
+	{
+		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
+		{
+			bool modified = false;
+			std::mt19937 rng((std::random_device())());
+
+			for (auto& BB : F)
+			{
+				for (auto& I : BB)
+				{
+					if (auto* store = llvm::dyn_cast<llvm::StoreInst>(&I))
+					{
+						auto* CI = dyn_cast<ConstantInt>(store->getValueOperand());
+
+						if (!CI || CI->getBitWidth() != 32)
+							continue;
+
+						uint32_t value = CI->getZExtValue();
+						uint32_t key = rng();
+						uint32_t obf_val = value ^ key;
+
+						IRBuilder<> builder(store);
+
+						Value* obfConst = ConstantInt::get(CI->getType(), obf_val); //make our obfuscated value
+						Value* keyConst = ConstantInt::get(CI->getType(), key);
+						store->setOperand(0, obfConst);
+
+						for (User* u : store->getPointerOperand()->users())
+						{
+							if (auto* load = dyn_cast<LoadInst>(u))
+							{
+								IRBuilder<> lb(load->getNextNode()); // Insert after the load to ensure dominance
+
+								Value* decoded = lb.CreateXor(load, keyConst);
+
+								SmallVector<Use*, 8> usesToReplace;
+
+								for (auto& use : load->uses())
+								{
+									if (use.getUser() != decoded)
+										usesToReplace.push_back(&use);
+								}
+
+								for (auto* use : usesToReplace)
+									use->set(decoded);
+							}
+						}
+
+						modified = true;
+					}
+				}
+			}
+
+			if(modified)
+				errs() << "Transformed IR: " << "\n" << F << "\n";
+
+			return modified ? PreservedAnalyses::none() : PreservedAnalyses::all(); //if modified, none of our preserved analysis are valid -> pass modified IR
 		}
 	};
 
@@ -195,6 +257,11 @@ extern "C" __declspec(dllexport) ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WE
 					else if (Name == "controlflatten")
 					{
 						FPM.addPass(ControlFlattenPass());
+						return true;
+					}
+					else if (Name == "xorconst")
+					{
+						FPM.addPass(XORConstInt());
 						return true;
 					}
 					else if (Name == "align")
