@@ -9,7 +9,7 @@
 
 using namespace llvm;
 
-namespace 
+namespace  //this project's transformations are specific to x64!
 {
 	/*
 		ConvertToHexByte - Converts a byte to a hexadecimal string representation.
@@ -26,7 +26,7 @@ namespace
 	/*
 	    InsertUnreachableJunkBlock - Inserts a random block of unreachable junk code into the function `F` at the specified `TargetBlock` of size `JunkByteSize`.
     */
-	void InsertUnreachableJunkBlock(Function* F, BasicBlock* TargetBlock, int JunkByteSize)
+	void InsertUnreachableJunkBlock(__inout BasicBlock* TargetBlock, __in const int& JunkByteSize)
 	{
 		IRBuilder<> Builder(TargetBlock);
 
@@ -55,7 +55,7 @@ namespace
 	/*
 	    InsertUnreachableJunkBlock - Inserts a block of unreachable junk code into the function `F` at the specified `TargetBlock`.
 	*/
-	void InsertUnreachableJunkBlock(Function* F, BasicBlock* TargetBlock, std::string JunkByteString) 
+	void InsertUnreachableJunkBlock(__inout BasicBlock* TargetBlock, __in const std::string& JunkByteString) 
 	{
 		IRBuilder<> Builder(TargetBlock);
 
@@ -71,7 +71,7 @@ namespace
 	/*
 		AddOpaquePredicate - Inserts an opaque predicate into the function `F`.
 	*/
-	void AddOpaquePredicate(Function* F)
+	void AddOpaquePredicate(__in Function* F)
 	{
 		LLVMContext& Ctx = F->getContext();
 
@@ -87,11 +87,21 @@ namespace
 					BasicBlock* TrueBlock = BasicBlock::Create(Ctx, "trueBlock", F, RetBlock);
 					BasicBlock* FalseBlock = BasicBlock::Create(Ctx, "falseBlock", F, RetBlock);
 
-					InsertUnreachableJunkBlock(F, FalseBlock, 100); //insert 100 junk bytes in false block of predicate
+					InsertUnreachableJunkBlock(FalseBlock, 100); //insert 100 junk bytes in false block of predicate
+
+					llvm::Type* voidTy = llvm::Type::getVoidTy(Ctx);
+					llvm::FunctionType* asmFuncTy = llvm::FunctionType::get(voidTy, false);
 
 					IRBuilder<> Builder(OpaqueEntry);
+
+					auto* PushAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0x50", "", false); //insert push rax since we muddy up the 'al' register with the .getTrue() statement
+					Builder.CreateCall(PushAsm);
+
 					Value* Cond = Builder.getTrue();
 					Builder.CreateCondBr(Cond, TrueBlock, FalseBlock);
+
+					auto* PopAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0x58", "", false); //pop rax
+					IRBuilder<>(TrueBlock).CreateCall(PopAsm);
 
 					IRBuilder<>(TrueBlock).CreateBr(RetBlock);
 
