@@ -5,24 +5,72 @@
 #include "llvm/Support/raw_ostream.h"  
 #include <map>
 #include <random>
+#include <string>
 
 using namespace llvm;
 
-namespace {
+namespace 
+{
+	/*
+		ConvertToHexByte - Converts a byte to a hexadecimal string representation.
+	*/
+	std::string ConvertToHexByte(__in const uint8_t& byte)
+	{
+		std::string hexByte = "0x";
+		char buffer[3];
+		sprintf_s(buffer, "%02X", byte);
+		hexByte += buffer;
+		return hexByte;
+	}
 
-	void InsertUnreachableJunkBlock(Function* F, BasicBlock* TargetBlock)
+	/*
+	    InsertUnreachableJunkBlock - Inserts a random block of unreachable junk code into the function `F` at the specified `TargetBlock` of size `JunkByteSize`.
+    */
+	void InsertUnreachableJunkBlock(Function* F, BasicBlock* TargetBlock, int JunkByteSize)
 	{
 		IRBuilder<> Builder(TargetBlock);
 
-		LLVMContext& Ctx = F->getContext();
 		FunctionType* JunkTy = FunctionType::get(Builder.getVoidTy(), false);
 
-		// Inline asm payload - fake logic + trap
-		InlineAsm* IA = InlineAsm::get(JunkTy, ".byte 0xEB,0x01,0x0F,0x13,0x17,0x21,0xFF,0xF1,0x01,0x55,0x88,0x23,0x79,0xc3,0xc3", "", false); //insert junk asm in opaque predicate block which never gets executed
+		std::string byteString = ".byte ";
+
+		for (int i = 0; i < JunkByteSize; i++)
+		{
+			std::mt19937 rng((std::random_device())());
+			uint8_t byte = rng() % 256; // Generate a random byte
+			std::string hexByte = ConvertToHexByte(byte);
+			byteString += hexByte;
+
+			if(i < JunkByteSize - 1)
+				byteString += ",";
+		}
+
+		errs() << "Generated junk byte string: " << byteString << "\n";
+
+		InlineAsm* IA = InlineAsm::get(JunkTy, byteString, "", false);
 		Builder.CreateCall(IA);
 		Builder.CreateUnreachable(); // ensures nothing follows
 	}
 
+	/*
+	    InsertUnreachableJunkBlock - Inserts a block of unreachable junk code into the function `F` at the specified `TargetBlock`.
+	*/
+	void InsertUnreachableJunkBlock(Function* F, BasicBlock* TargetBlock, std::string JunkByteString) 
+	{
+		IRBuilder<> Builder(TargetBlock);
+
+		FunctionType* JunkTy = FunctionType::get(Builder.getVoidTy(), false);
+
+		std::string byteString = ".byte " + JunkByteString;
+
+		InlineAsm* IA = InlineAsm::get(JunkTy, byteString, "", false); //insert junk asm in opaque predicate block which never gets executed
+		Builder.CreateCall(IA);
+		Builder.CreateUnreachable(); // ensures nothing follows
+	}
+
+	/*
+		AddOpaquePredicate - Inserts an opaque predicate into the function `F`.
+	*/
 	void AddOpaquePredicate(Function* F)
 	{
 		LLVMContext& Ctx = F->getContext();
@@ -39,7 +87,7 @@ namespace {
 					BasicBlock* TrueBlock = BasicBlock::Create(Ctx, "trueBlock", F, RetBlock);
 					BasicBlock* FalseBlock = BasicBlock::Create(Ctx, "falseBlock", F, RetBlock);
 
-					InsertUnreachableJunkBlock(F, FalseBlock);
+					InsertUnreachableJunkBlock(F, FalseBlock, 100); //insert 100 junk bytes in false block of predicate
 
 					IRBuilder<> Builder(OpaqueEntry);
 					Value* Cond = Builder.getTrue();
@@ -55,11 +103,9 @@ namespace {
 			}
 		}
 	}
-
-	// Define the pass that inherits from PassInfoMixin  
+  
 	struct OpaqueTransformPass : public PassInfoMixin<OpaqueTransformPass>
 	{
-		// Implement the run function  
 		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
 		{
 			errs() << "Applying OpaqueTransformPass to function: " << F.getName() << "\n";
@@ -79,9 +125,9 @@ namespace {
 			bool modified = false;
 			std::mt19937 rng((std::random_device())());
 
-			for (auto& BB : F)
+			for (auto& BB : F) //loop over basic blocks
 			{
-				for (auto& I : BB)
+				for (auto& I : BB) //loop over instructions in each basic block
 				{
 					if (auto* store = llvm::dyn_cast<llvm::StoreInst>(&I))
 					{
@@ -93,8 +139,6 @@ namespace {
 						uint32_t value = CI->getZExtValue();
 						uint32_t key = rng();
 						uint32_t obf_val = value ^ key;
-
-						IRBuilder<> builder(store);
 
 						Value* obfConst = ConstantInt::get(CI->getType(), obf_val); //make our obfuscated value
 						Value* keyConst = ConstantInt::get(CI->getType(), key);
