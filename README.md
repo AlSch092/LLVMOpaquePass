@@ -1,5 +1,5 @@
 # LLVMOpaquePass
-Babby's first LLVM Pass which inserts an opaque predicate at the end of a function, filled with junk bytes to cause IDA analysis to fail (x86_64). Will be improved over time as I get better with LLVM passes.  
+LLVM Pass which inserts an opaque predicate at the end of a function, filled with junk bytes to cause IDA analysis to fail (x86_64). Will be improved over time as I get better with LLVM passes. The techniques presented are specific to x64, since they involve inline assembler using numeric byte numbers instead of explicit instructions  
 
 Basic XOR integer const obfuscation has also been added, with pass name `xorconst`. Constant values are xor'd when declared, and xor'd (decoded) when they are referenced in an instruction's operand.  
 
