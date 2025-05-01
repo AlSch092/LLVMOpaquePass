@@ -1,3 +1,4 @@
+//By AlSch092 @ Github
 #include "llvm/Passes/PassPlugin.h"  
 #include "llvm/Passes/PassBuilder.h"  
 #include "llvm/IR/PassManager.h"  
@@ -11,6 +12,12 @@ using namespace llvm;
 
 namespace  //this project's transformations are specific to x64!
 {
+	enum Architecture
+	{
+		X86_64,
+		AARCH64
+	};
+
 	/*
 		ConvertToHexByte - Converts a byte to a hexadecimal string representation.
 	*/
@@ -47,7 +54,7 @@ namespace  //this project's transformations are specific to x64!
 
 		errs() << "Generated junk byte string: " << byteString << "\n";
 
-		InlineAsm* IA = InlineAsm::get(JunkTy, byteString, "", false);
+		InlineAsm* IA = InlineAsm::get(JunkTy, byteString, "", true); //use 'true' as 2nd param to avoid getting optimized out
 		Builder.CreateCall(IA);
 		Builder.CreateUnreachable(); // ensures nothing follows
 	}
@@ -63,7 +70,7 @@ namespace  //this project's transformations are specific to x64!
 
 		std::string byteString = ".byte " + JunkByteString;
 
-		InlineAsm* IA = InlineAsm::get(JunkTy, byteString, "", false); //insert junk asm in opaque predicate block which never gets executed
+		InlineAsm* IA = InlineAsm::get(JunkTy, byteString, "", true); //insert junk asm in opaque predicate block which never gets executed , use 'true' as 2nd param to avoid getting optimized out
 		Builder.CreateCall(IA);
 		Builder.CreateUnreachable(); // ensures nothing follows
 	}
@@ -71,7 +78,7 @@ namespace  //this project's transformations are specific to x64!
 	/*
 		AddOpaquePredicate - Inserts an opaque predicate into the function `F`.
 	*/
-	void AddOpaquePredicate(__in Function* F)
+	void AddOpaquePredicate(__in Function* F, Architecture A)
 	{
 		LLVMContext& Ctx = F->getContext();
 
@@ -94,13 +101,26 @@ namespace  //this project's transformations are specific to x64!
 
 					IRBuilder<> Builder(OpaqueEntry);
 
-					auto* PushAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0x50", "", false); //insert push rax since we muddy up the 'al' register with the .getTrue() statement
+					llvm::InlineAsm* PushAsm;
+
+					if (A == X86_64)
+						PushAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0x50", "", true); //insert push rax since we muddy up the 'al' register with the .getTrue() statement
+					else if (A == AARCH64)
+						PushAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0xE0,0x0F,0x1F,0xF8", "", true); // str x0, [sp, -16]! ;  push rax equivalent
+					
 					Builder.CreateCall(PushAsm);
 
 					Value* Cond = Builder.getTrue();
+				
 					Builder.CreateCondBr(Cond, TrueBlock, FalseBlock);
+					
+					llvm::InlineAsm* PopAsm;
 
-					auto* PopAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0x58", "", false); //pop rax
+					if (A == X86_64)
+					    PopAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0x58", "", true); //pop rax   , the true as 2nd parameter forces it to not be optimized out
+					else if (A == AARCH64)
+						PopAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0xE0,0x07,0x41,0xF8", "", true);
+					
 					IRBuilder<>(TrueBlock).CreateCall(PopAsm);
 
 					IRBuilder<>(TrueBlock).CreateBr(RetBlock);
@@ -120,7 +140,21 @@ namespace  //this project's transformations are specific to x64!
 		{
 			errs() << "Applying OpaqueTransformPass to function: " << F.getName() << "\n";
 
-			AddOpaquePredicate(&F); // Insert opaque predicate logic
+		    AddOpaquePredicate(&F, Architecture::X86_64);   // Insert opaque predicate logic
+
+			errs() << "Transformed IR: " << "\n" << F << "\n";
+
+			return PreservedAnalyses::all();
+		}
+	};
+
+	struct OpaqueTransformPassAA64 : public PassInfoMixin<OpaqueTransformPassAA64>
+	{
+		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
+		{
+			errs() << "Applying OpaqueTransformPass (AARCH64) to function: " << F.getName() << "\n";
+
+			AddOpaquePredicate(&F, Architecture::AARCH64); // Insert opaque predicate logic
 
 			errs() << "Transformed IR: " << "\n" << F << "\n";
 
@@ -308,7 +342,12 @@ extern "C" __declspec(dllexport) ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WE
 						FPM.addPass(OpaqueTransformPass());
 						return true;
 					}
-					else if (Name == "controlflatten")
+					else if (Name == "opaqueAARCH64")
+					{
+						FPM.addPass(OpaqueTransformPassAA64());
+						return true;
+					}
+					else if (Name == "controlflatten") //not yet finished - we need to make a state variable and then flatten all nested blocks into a "base layer" block, where flow is decided by the state
 					{
 						FPM.addPass(ControlFlattenPass());
 						return true;
