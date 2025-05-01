@@ -4,9 +4,11 @@ LLVM Pass which inserts an opaque predicate at the end of a function, filled wit
 Basic XOR integer const obfuscation has also been added, with pass name `xorconst`. Constant values are xor'd when declared, and xor'd (decoded) when they are referenced in an instruction's operand.  
 
 ## Usage: 
- `opt -load-pass-plugin="OpaquePass.dll" -passes='opaque' Input.ll -S -o Output.ll`  
+ x64: `opt -load-pass-plugin="OpaquePass.dll" -passes='opaque' Input.ll -S -o Output.ll`   
 
-or...
+ AArch64: `opt -load-pass-plugin="OpaquePass.dll" -passes='opaqueAARCH64' Input.ll -S -o Output.ll`   
+
+or, for XOR encoding of constants:  
 
 `opt -load-pass-plugin="OpaquePass.dll" -passes='xorconst' Input.ll -S -o Output.ll`  
  
