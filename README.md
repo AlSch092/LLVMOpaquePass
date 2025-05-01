@@ -5,6 +5,10 @@ Basic XOR integer const obfuscation has also been added, with pass name `xorcons
 
 ## Usage: 
  `opt -load-pass-plugin="OpaquePass.dll" -passes='opaque' Input.ll -S -o Output.ll`  
+
+or...
+
+`opt -load-pass-plugin="OpaquePass.dll" -passes='xorconst' Input.ll -S -o Output.ll`  
  
 ## Comparison (IDA)
 
