@@ -7,6 +7,7 @@
 #include <map>
 #include <random>
 #include <string>
+#include <sstream>
 
 using namespace llvm;
 
@@ -28,6 +29,17 @@ namespace  //this project's transformations are specific to x64!
 		sprintf_s(buffer, "%02X", byte);
 		hexByte += buffer;
 		return hexByte;
+	}
+
+	/*
+	    getBlockLabel - returns a string of `BB`'s label, ex. %0 or %27
+	*/
+	std::string getBlockLabel(llvm::BasicBlock* BB)
+	{
+		std::string str;
+		llvm::raw_string_ostream rso(str);
+		BB->printAsOperand(rso, false); // 'false' = don't print type
+		return rso.str();
 	}
 
 	/*
@@ -119,7 +131,7 @@ namespace  //this project's transformations are specific to x64!
 					if (A == X86_64)
 					    PopAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0x58", "", true); //pop rax   , the true as 2nd parameter forces it to not be optimized out
 					else if (A == AARCH64)
-						PopAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0xE0,0x07,0x41,0xF8", "", true);
+						PopAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0xE0,0x07,0x41,0xF8", "", true); // ldr x0, [sp], 16 ; pop rax equivalent
 					
 					IRBuilder<>(TrueBlock).CreateCall(PopAsm);
 
@@ -133,14 +145,167 @@ namespace  //this project's transformations are specific to x64!
 			}
 		}
 	}
-  
+
+	bool isInConditionalPath(BasicBlock* BB, std::set<BasicBlock*>& visited)
+	{
+		if (!visited.insert(BB).second) //already visited
+			return false;
+
+		for (BasicBlock* Pred : predecessors(BB)) //loop over predecessors of BB
+		{
+			if (pred_empty(Pred))
+				return false;
+
+			Instruction* term = Pred->getTerminator();
+
+			if (auto* BI = dyn_cast<BranchInst>(term)) //is predecessor's terminator a branch instruction?
+			{
+				if (BI->isConditional())
+				{
+					if (BI->getSuccessor(0) == BB || BI->getSuccessor(1) == BB)
+						return true;
+				}
+
+				if (isInConditionalPath(Pred, visited))
+					return true;
+			}
+		}
+
+		return false;
+	}
+
+	bool isInIfElseStructure(BasicBlock* BB)
+	{
+		std::set<BasicBlock*> visited;
+
+		// Entry block should never be nested
+		if (pred_empty(BB))
+			return false;
+
+		return isInConditionalPath(BB, visited);
+	}
+
+	struct MyTestPass : public PassInfoMixin<MyTestPass> //control flow flattening test
+	{
+		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
+		{
+			if (F.isDeclaration() || F.size() < 2 || F.getName() != "DoControlFlow")
+				return PreservedAnalyses::all();
+
+			errs() << "MyTestPass: " << F.getName() << "\n";
+			
+			LLVMContext& Ctx = F.getContext();
+			IRBuilder<> Builder(&*F.getEntryBlock().getFirstInsertionPt());
+			IntegerType* Int32Ty = Type::getInt32Ty(Ctx);
+
+			AllocaInst* store = Builder.CreateAlloca(Builder.getInt32Ty(), nullptr, "stateVar");
+			Builder.CreateStore(Builder.getInt32(0), store); //state var to 0
+			
+			BasicBlock* dispatcher = BasicBlock::Create(Ctx, "dispatcher", &F); //make a block for dispatcher/switch statement
+			//Builder.CreateBr(dispatcher);
+
+			IRBuilder<> DispatchBuilder(dispatcher);
+			LoadInst* stateVal = DispatchBuilder.CreateLoad(Int32Ty, store);
+			SwitchInst* Switch = DispatchBuilder.CreateSwitch(stateVal, dispatcher);
+
+			for (BasicBlock& BB : F)
+			{
+				bool nested = false;
+
+				//else 
+				if (isInIfElseStructure(&BB))
+				{
+					nested = true;
+				}
+
+				for (BasicBlock* Pred : predecessors(&BB))
+				{
+					if (getBlockLabel(Pred) == "%0")
+					{
+						nested = false;
+					}
+				}
+
+				if (nested)
+				{
+					errs() << "Nested block found: " << getBlockLabel(&BB) << "\n" ;
+				}
+				else
+				{
+					errs() << "NON-Nested block found: " << getBlockLabel(&BB) << "\n" ;
+				}
+			}
+
+			return PreservedAnalyses::all();
+		}
+	};
+
+	struct CleanupInlinedFunctionsPass : public PassInfoMixin<CleanupInlinedFunctionsPass>  //module pass
+	{
+		PreservedAnalyses run(Module& M, ModuleAnalysisManager&) 
+		{
+			std::vector<Function*> toRemove;
+
+			for (Function& F : M) 
+			{
+				if (F.isDeclaration())
+					continue;
+
+				if (F.isDeclaration()) continue;
+
+				if (F.getName() == "main" || F.getName() == "DllMain" || F.getName() == "DriverEntry") continue;
+
+				//if (!F.hasInternalLinkage()) continue;
+
+				//if (F.hasAddressTaken()) continue;
+
+				if (!F.use_empty()) continue;
+
+				errs() << "Cleanup: Deleting inlined and unused function: " << F.getName() << "\n";
+				toRemove.push_back(&F);
+			}
+
+			for (Function* F : toRemove) 
+			{
+				F->eraseFromParent();
+			}
+
+			return PreservedAnalyses::none();
+		}
+	};
+
+	struct ForceInlinePass : public PassInfoMixin<ForceInlinePass> //works, but needs to call module(cleanup_inlined) in order to delete unused functions which were inlined
+	{
+		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
+		{
+			if (F.isDeclaration() || F.size() < 2)
+				return PreservedAnalyses::all();
+
+			bool InlinedFunc = false;
+
+			errs() << "ForceInlinePass: " << F.getName() << "\n";
+
+			if (!F.isDeclaration() && !F.hasFnAttribute(Attribute::AlwaysInline) && !F.hasFnAttribute(Attribute::NoInline))
+			{
+				F.addFnAttr(Attribute::AlwaysInline);
+				errs() << "ForceInlinePass: Inlining function " << F.getName() << "\n";
+				InlinedFunc = true;
+			}
+
+			return InlinedFunc ? PreservedAnalyses::none() : PreservedAnalyses::all();
+		}
+	};
+
 	struct OpaqueTransformPass : public PassInfoMixin<OpaqueTransformPass>
 	{
 		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
 		{
-			errs() << "Applying OpaqueTransformPass to function: " << F.getName() << "\n";
+			if (F.isDeclaration() || F.size() < 2)
+				return PreservedAnalyses::all();
 
-		    AddOpaquePredicate(&F, Architecture::X86_64);   // Insert opaque predicate logic
+			errs() << "Applying OpaqueTransformPass (x64) to function: " << F.getName() << "\n";
+
+		    AddOpaquePredicate(&F, Architecture::X86_64);
 
 			errs() << "Transformed IR: " << "\n" << F << "\n";
 
@@ -152,6 +317,9 @@ namespace  //this project's transformations are specific to x64!
 	{
 		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
 		{
+			if (F.isDeclaration() || F.size() < 2)
+				return PreservedAnalyses::all();
+
 			errs() << "Applying OpaqueTransformPass (AARCH64) to function: " << F.getName() << "\n";
 
 			AddOpaquePredicate(&F, Architecture::AARCH64); // Insert opaque predicate logic
@@ -162,12 +330,13 @@ namespace  //this project's transformations are specific to x64!
 		}
 	};
 
-	struct XORConstInt : public PassInfoMixin<XORConstInt>  //xor obfuscate constants, working on basic tests (without arithmetic involved)
+	struct XORConstInt : public PassInfoMixin<XORConstInt>  //xor obfuscate constants declared in entry block, decodes them when they are used in function calls
 	{
 		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
 		{
 			bool modified = false;
 			std::mt19937 rng((std::random_device())());
+			const uint32_t key = rng();
 
 			for (auto& BB : F) //loop over basic blocks
 			{
@@ -175,41 +344,49 @@ namespace  //this project's transformations are specific to x64!
 				{
 					if (auto* store = llvm::dyn_cast<llvm::StoreInst>(&I))
 					{
+						if (getBlockLabel(&BB) != "%0")
+							continue;
+
 						auto* CI = dyn_cast<ConstantInt>(store->getValueOperand());
 
 						if (!CI || CI->getBitWidth() != 32)
 							continue;
 
 						uint32_t value = CI->getZExtValue();
-						uint32_t key = rng();
 						uint32_t obf_val = value ^ key;
 
 						Value* obfConst = ConstantInt::get(CI->getType(), obf_val); //make our obfuscated value
 						Value* keyConst = ConstantInt::get(CI->getType(), key);
 						store->setOperand(0, obfConst);
+				
+						modified = true;
+					}
+					
+					if (auto* callInst = dyn_cast<CallInst>(&I)) 
+					{
+						auto* calledFunc = callInst->getCalledFunction();
+						if (!calledFunc || calledFunc->isVarArg())
+							continue;
 
-						for (User* u : store->getPointerOperand()->users())
+						for (unsigned i = 0; i < callInst->getNumOperands(); ++i) 
 						{
-							if (auto* load = dyn_cast<LoadInst>(u))
+							Value* arg = callInst->getArgOperand(i);
+				
+							if (auto* loadInst = dyn_cast<LoadInst>(arg)) 
 							{
-								IRBuilder<> lb(load->getNextNode()); // Insert after the load to ensure dominance
+								if (!loadInst->getType()->isIntegerTy(32))
+									continue;
 
-								Value* decoded = lb.CreateXor(load, keyConst);
+								IRBuilder<> builder(loadInst->getNextNode());
+								Value* keyConst = ConstantInt::get(loadInst->getType(), key);
+								Value* decoded = builder.CreateXor(loadInst, keyConst, "decoded");
 
-								SmallVector<Use*, 8> usesToReplace;
+								callInst->setArgOperand(i, decoded);
+								modified = true;
 
-								for (auto& use : load->uses())
-								{
-									if (use.getUser() != decoded)
-										usesToReplace.push_back(&use);
-								}
-
-								for (auto* use : usesToReplace)
-									use->set(decoded);
+								errs() << "Inserted XOR decode for argument " << i << "\n";
 							}
 						}
-
-						modified = true;
 					}
 				}
 			}
@@ -221,7 +398,7 @@ namespace  //this project's transformations are specific to x64!
 		}
 	};
 
-	struct AlignPass : public PassInfoMixin<AlignPass>  //test, not particularly useful
+	struct AlignPass : public PassInfoMixin<AlignPass>  //test, not particularly useful. sets alignment to 16 for alloca instructs
 	{
 		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
 		{
@@ -327,12 +504,9 @@ extern "C" __declspec(dllexport) ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WE
 {
 	return
 	{
-		LLVM_PLUGIN_API_VERSION, // Version of the plugin interface  
-		"TestTransformPass",                // Name of the pass  
-		LLVM_VERSION_STRING,     // LLVM version  
-		[](PassBuilder& PB)
+		LLVM_PLUGIN_API_VERSION, "TestTransformPass", LLVM_VERSION_STRING, [](PassBuilder& PB)
 		{
-			// Register the pass with the pass builder  
+			//function passes
 			PB.registerPipelineParsingCallback(
 				[](StringRef Name, FunctionPassManager& FPM,
 				   ArrayRef<PassBuilder::PipelineElement>)
@@ -362,8 +536,34 @@ extern "C" __declspec(dllexport) ::llvm::PassPluginLibraryInfo LLVM_ATTRIBUTE_WE
 						FPM.addPass(AlignPass());
 						return true;
 					}
+					else if (Name == "forceinline")
+					{
+						FPM.addPass(ForceInlinePass());
+						return true;
+					}
+					else if (Name == "test")
+					{
+						FPM.addPass(MyTestPass());
+						return true;
+					}
+
 					return false;
 				});
+			
+			//module passes
+			PB.registerPipelineParsingCallback(
+				[](StringRef Name, ModulePassManager& MPM,
+					ArrayRef<PassBuilder::PipelineElement>)
+				{
+					if (Name == "cleanup-inlined")
+					{
+						MPM.addPass(CleanupInlinedFunctionsPass());
+						return true;
+					}
+
+					return false;
+				}
+			);
 		}
 	};
 }
