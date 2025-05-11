@@ -8,28 +8,17 @@
 #include <random>
 #include <string>
 #include <sstream>
+#include "Helpers.hpp"
 
 using namespace llvm;
 
-namespace  //this project's transformations are specific to x64!
+namespace  //currently the only "good"/finished pass in here are the Opaque ones (opaque, opaqueAARCH64)! Use the other ones with caution!
 {
 	enum Architecture
 	{
 		X86_64,
 		AARCH64
 	};
-
-	/*
-		ConvertToHexByte - Converts a byte to a hexadecimal string representation.
-	*/
-	std::string ConvertToHexByte(__in const uint8_t& byte)
-	{
-		std::string hexByte = "0x";
-		char buffer[3];
-		sprintf_s(buffer, "%02X", byte);
-		hexByte += buffer;
-		return hexByte;
-	}
 
 	/*
 	    getBlockLabel - returns a string of `BB`'s label, ex. %0 or %27
@@ -116,10 +105,16 @@ namespace  //this project's transformations are specific to x64!
 					llvm::InlineAsm* PushAsm;
 
 					if (A == X86_64)
-						PushAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0x50", "", true); //insert push rax since we muddy up the 'al' register with the .getTrue() statement
+						PushAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0x50", "", true); //insert push rax since we muddy up the 'al' register with the .getTrue() statement.  we use "true" as the 2nd param to avoid it being optimized out by accident
 					else if (A == AARCH64)
-						PushAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0xE0,0x0F,0x1F,0xF8", "", true); // str x0, [sp, -16]! ;  push rax equivalent
+						PushAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0xE0,0x0F,0x1F,0xF8", "", true); // str x0, [sp, -16]! ;  push rax equivalent. we use "true" as the 2nd param to avoid it being optimized out by accident
 					
+					if (PushAsm == nullptr)
+					{
+						errs() << "*WARNING* PushAsm instruction is null! Please make sure you've selected either x64 or AARCH64 as your architecture! \n";
+						exit(1);
+					}
+
 					Builder.CreateCall(PushAsm);
 
 					Value* Cond = Builder.getTrue();
@@ -133,9 +128,9 @@ namespace  //this project's transformations are specific to x64!
 					else if (A == AARCH64)
 						PopAsm = llvm::InlineAsm::get(asmFuncTy, ".byte 0xE0,0x07,0x41,0xF8", "", true); // ldr x0, [sp], 16 ; pop rax equivalent
 					
-					IRBuilder<>(TrueBlock).CreateCall(PopAsm);
+					IRBuilder<>(TrueBlock).CreateCall(PopAsm); //pop the return value back into rax so that it can be properly returned
 
-					IRBuilder<>(TrueBlock).CreateBr(RetBlock);
+					IRBuilder<>(TrueBlock).CreateBr(RetBlock); //in the true block which is always taken, jump to the ending ret block which was previously split
 
 					BB.getTerminator()->eraseFromParent();
 					IRBuilder<>(&BB).CreateBr(OpaqueEntry);
@@ -185,7 +180,7 @@ namespace  //this project's transformations are specific to x64!
 		return isInConditionalPath(BB, visited);
 	}
 
-	struct MyTestPass : public PassInfoMixin<MyTestPass> //control flow flattening test
+	struct MyTestPass : public PassInfoMixin<MyTestPass> //control flow flattening test -> not yet finished!! do not use!
 	{
 		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
 		{
@@ -253,13 +248,15 @@ namespace  //this project's transformations are specific to x64!
 
 				if (F.isDeclaration()) continue;
 
-				if (F.getName() == "main" || F.getName() == "DllMain" || F.getName() == "DriverEntry") continue;
+				if (F.getName() == "main" || F.getName() == "DllMain" || F.getName() == "DriverEntry") 
+					continue;
 
 				//if (!F.hasInternalLinkage()) continue;
 
 				//if (F.hasAddressTaken()) continue;
 
-				if (!F.use_empty()) continue;
+				if (!F.use_empty())
+					continue;
 
 				errs() << "Cleanup: Deleting inlined and unused function: " << F.getName() << "\n";
 				toRemove.push_back(&F);
@@ -279,6 +276,9 @@ namespace  //this project's transformations are specific to x64!
 		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
 		{
 			if (F.isDeclaration() || F.size() < 2)
+				return PreservedAnalyses::all();
+
+			if (!F.hasFnAttribute("forceinline")) //make sure function is tagged with 'forceinline'
 				return PreservedAnalyses::all();
 
 			bool InlinedFunc = false;
@@ -303,13 +303,16 @@ namespace  //this project's transformations are specific to x64!
 			if (F.isDeclaration() || F.size() < 2)
 				return PreservedAnalyses::all();
 
+			if(!F.hasFnAttribute("insertopaque")) //make sure function is tagged with 'insertopaque'
+				return PreservedAnalyses::all();
+
 			errs() << "Applying OpaqueTransformPass (x64) to function: " << F.getName() << "\n";
 
 		    AddOpaquePredicate(&F, Architecture::X86_64);
 
 			errs() << "Transformed IR: " << "\n" << F << "\n";
 
-			return PreservedAnalyses::all();
+			return PreservedAnalyses::all(); //opaque pass with junk bytes inserted doesn't really modify the IR since the false block is never taken, so analysis can continue as normal
 		}
 	};
 
@@ -320,23 +323,29 @@ namespace  //this project's transformations are specific to x64!
 			if (F.isDeclaration() || F.size() < 2)
 				return PreservedAnalyses::all();
 
+			if (!F.hasFnAttribute("insertopaque")) //make sure function is tagged with 'insertopaque'
+				return PreservedAnalyses::all();
+
 			errs() << "Applying OpaqueTransformPass (AARCH64) to function: " << F.getName() << "\n";
 
 			AddOpaquePredicate(&F, Architecture::AARCH64); // Insert opaque predicate logic
 
 			errs() << "Transformed IR: " << "\n" << F << "\n";
 
-			return PreservedAnalyses::all();
+			return PreservedAnalyses::all(); //opaque pass with junk bytes inserted doesn't really modify the IR since the false block is never taken, so analysis can continue as normal
 		}
 	};
 
 	struct XORConstInt : public PassInfoMixin<XORConstInt>  //xor obfuscate constants declared in entry block, decodes them when they are used in function calls
 	{
-		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM)
+		PreservedAnalyses run(Function& F, FunctionAnalysisManager& AM) //functions tagged with "xorconst-obfs" will XOR constant ints in them, then functions with "xorconst-deobfs" will decode their parameters inside their function call's entry block
 		{
 			bool modified = false;
 			std::mt19937 rng((std::random_device())());
-			const uint32_t key = rng();
+			const uint64_t key = (static_cast<uint64_t>(rng()) << 32) | rng();
+
+			if (!F.hasFnAttribute("xorconst-obfs")) //make sure function is tagged with 'xorconst-obfs'
+				return PreservedAnalyses::all();
 
 			for (auto& BB : F) //loop over basic blocks
 			{
@@ -344,12 +353,12 @@ namespace  //this project's transformations are specific to x64!
 				{
 					if (auto* store = llvm::dyn_cast<llvm::StoreInst>(&I))
 					{
-						if (getBlockLabel(&BB) != "%0")
+						if (getBlockLabel(&BB) != "%0") //only obfuscate stores in the entry block. the goal here is to obfuscate the XOR in the entry block, then de-code them when functions use them as operands
 							continue;
 
 						auto* CI = dyn_cast<ConstantInt>(store->getValueOperand());
 
-						if (!CI || CI->getBitWidth() != 32)
+						if (!CI)
 							continue;
 
 						uint32_t value = CI->getZExtValue();
@@ -362,31 +371,49 @@ namespace  //this project's transformations are specific to x64!
 						modified = true;
 					}
 					
-					if (auto* callInst = dyn_cast<CallInst>(&I)) 
+					//if (auto* callInst = dyn_cast<CallInst>(&I)) //inserts xor's where there are 'load' statements before a 'call' statement
+					//{
+					//	auto* calledFunc = callInst->getCalledFunction();
+					//	if (!calledFunc || calledFunc->isVarArg())
+					//		continue;
+
+					//	for (unsigned i = 0; i < callInst->getNumOperands(); ++i) 
+					//	{
+					//		Value* arg = callInst->getArgOperand(i);
+				
+					//		if (auto* loadInst = dyn_cast<LoadInst>(arg)) 
+					//		{
+					//			if (!loadInst->getType()->isIntegerTy(32))
+					//				continue;
+
+					//			IRBuilder<> builder(loadInst->getNextNode());
+					//			Value* keyConst = ConstantInt::get(loadInst->getType(), key);
+					//			Value* decoded = builder.CreateXor(loadInst, keyConst, "decoded");
+
+					//			callInst->setArgOperand(i, decoded);
+					//			modified = true;
+
+					//			errs() << "Inserted XOR decode for argument " << i << "\n";
+					//		}
+					//	}
+					//}
+				}
+			}
+
+			if (F.getName() == "DoTest" || F.hasFnAttribute("xorconst-deobfs")) //if the function is "DoTest" (my own testing) or has "xorconst" attribute tag, XOR the arguments which are constant ints (insert xor instructions in our function which deobfuscate function arguments that are const ints)
+			{
+				IRBuilder<> builder(&*F.getEntryBlock().getFirstInsertionPt());
+
+				for (Argument& arg : F.args())
+				{
+					if (arg.getType()->isIntegerTy())
 					{
-						auto* calledFunc = callInst->getCalledFunction();
-						if (!calledFunc || calledFunc->isVarArg())
+						if (arg.hasOneUse() && isa<Constant>(arg.use_begin()->get()))
 							continue;
 
-						for (unsigned i = 0; i < callInst->getNumOperands(); ++i) 
-						{
-							Value* arg = callInst->getArgOperand(i);
-				
-							if (auto* loadInst = dyn_cast<LoadInst>(arg)) 
-							{
-								if (!loadInst->getType()->isIntegerTy(32))
-									continue;
-
-								IRBuilder<> builder(loadInst->getNextNode());
-								Value* keyConst = ConstantInt::get(loadInst->getType(), key);
-								Value* decoded = builder.CreateXor(loadInst, keyConst, "decoded");
-
-								callInst->setArgOperand(i, decoded);
-								modified = true;
-
-								errs() << "Inserted XOR decode for argument " << i << "\n";
-							}
-						}
+						Value* xorVal = llvm::ConstantInt::get(arg.getType(), key);
+						Value* xorInst = builder.CreateXor(&arg, xorVal, arg.getName() + "_xored"); //create xor instruction which xors the argument with key
+						//arg.replaceAllUsesWith(xorInst); //replace all uses of the original argument with the xored value
 					}
 				}
 			}
